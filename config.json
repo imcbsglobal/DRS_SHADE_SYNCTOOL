@@ -1,0 +1,19 @@
+{
+    "source_db": {
+        "driver": "SQL Anywhere 17",
+        "server": "SHADEDB",
+        "database": "SHADEDB",
+        "uid": "DBA",
+        "pwd": "(*$^)",
+        "port": 2638
+    },
+    "target_db": {
+        "type": "sqlite",
+        "path": "db.sqlite3"
+    },
+    "sync": {
+        "interval_seconds": 300,
+        "log_file": "hms_sync.log",
+        "log_level": "INFO"
+    }
+}

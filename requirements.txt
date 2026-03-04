@@ -1,0 +1,4 @@
+requests>=2.31.0
+# DB drivers (install one):
+# sqlanydb          # native SQL Anywhere Python driver
+# pyodbc            # ODBC-based driver
