@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['PIL._tkinter_finder', 'PIL.ImageTk', 'PIL.Image', 'pyodbc', 'plyer', 'plyer.platforms.win.notification']
+hiddenimports = ['PIL._tkinter_finder', 'PIL.ImageTk', 'PIL.Image', 'pyodbc', 'plyer', 'plyer.platforms.win.notification', 'psycopg2', 'psycopg2.extras', 'psycopg2._psycopg']
 hiddenimports += collect_submodules('PIL')
+hiddenimports += collect_submodules('psycopg2')
 
 
 a = Analysis(

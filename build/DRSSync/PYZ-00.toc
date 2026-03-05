@@ -534,6 +534,7 @@
   ('pathlib._abc', 'C:\\Python313\\Lib\\pathlib\\_abc.py', 'PYMODULE'),
   ('pathlib._local', 'C:\\Python313\\Lib\\pathlib\\_local.py', 'PYMODULE'),
   ('pickle', 'C:\\Python313\\Lib\\pickle.py', 'PYMODULE'),
+  ('platform', 'C:\\Python313\\Lib\\platform.py', 'PYMODULE'),
   ('plyer',
    'D:\\IMC SYNC '
    '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\plyer\\__init__.py',
@@ -711,6 +712,50 @@
    '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\plyer\\utils.py',
    'PYMODULE'),
   ('pprint', 'C:\\Python313\\Lib\\pprint.py', 'PYMODULE'),
+  ('psycopg2',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\__init__.py',
+   'PYMODULE'),
+  ('psycopg2._ipaddress',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\_ipaddress.py',
+   'PYMODULE'),
+  ('psycopg2._json',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\_json.py',
+   'PYMODULE'),
+  ('psycopg2._range',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\_range.py',
+   'PYMODULE'),
+  ('psycopg2.errorcodes',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\errorcodes.py',
+   'PYMODULE'),
+  ('psycopg2.errors',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\errors.py',
+   'PYMODULE'),
+  ('psycopg2.extensions',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\extensions.py',
+   'PYMODULE'),
+  ('psycopg2.extras',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\extras.py',
+   'PYMODULE'),
+  ('psycopg2.pool',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\pool.py',
+   'PYMODULE'),
+  ('psycopg2.sql',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\sql.py',
+   'PYMODULE'),
+  ('psycopg2.tz',
+   'D:\\IMC SYNC '
+   '_TOOLS\\DRS_CLINIC\\DRS_SYNCTOOL\\venv\\Lib\\site-packages\\psycopg2\\tz.py',
+   'PYMODULE'),
   ('py_compile', 'C:\\Python313\\Lib\\py_compile.py', 'PYMODULE'),
   ('quopri', 'C:\\Python313\\Lib\\quopri.py', 'PYMODULE'),
   ('random', 'C:\\Python313\\Lib\\random.py', 'PYMODULE'),
@@ -753,6 +798,7 @@
   ('urllib.parse', 'C:\\Python313\\Lib\\urllib\\parse.py', 'PYMODULE'),
   ('urllib.request', 'C:\\Python313\\Lib\\urllib\\request.py', 'PYMODULE'),
   ('urllib.response', 'C:\\Python313\\Lib\\urllib\\response.py', 'PYMODULE'),
+  ('uuid', 'C:\\Python313\\Lib\\uuid.py', 'PYMODULE'),
   ('xml', 'C:\\Python313\\Lib\\xml\\__init__.py', 'PYMODULE'),
   ('xml.etree', 'C:\\Python313\\Lib\\xml\\etree\\__init__.py', 'PYMODULE'),
   ('xml.etree.ElementInclude',

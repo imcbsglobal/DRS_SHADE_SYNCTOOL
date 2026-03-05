@@ -55,7 +55,7 @@ def fail(msg):
 
 def install_deps():
     step("Installing / verifying dependencies …")
-    pkgs = ["pyodbc", "Pillow>=10.0.0", "plyer", "pyinstaller>=6.0.0"]
+    pkgs = ["pyodbc", "Pillow>=10.0.0", "plyer", "pyinstaller>=6.0.0", "psycopg2-binary"]
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install"] + pkgs,
         stdout=subprocess.DEVNULL,
@@ -191,6 +191,10 @@ def build():
         "--hidden-import", "pyodbc",
         "--hidden-import", "plyer",
         "--hidden-import", "plyer.platforms.win.notification",
+        "--hidden-import", "psycopg2",
+        "--hidden-import", "psycopg2.extras",
+        "--hidden-import", "psycopg2._psycopg",
+        "--collect-submodules", "psycopg2",
         # Bundle config.json
         f"--add-data={config_path}{os.pathsep}.",
     ]

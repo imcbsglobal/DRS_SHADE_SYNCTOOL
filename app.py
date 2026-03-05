@@ -224,36 +224,36 @@ def do_sync(cfg, log_fn):
         try: src.close()
         except: pass
 
-    log_fn("Writing to local database \u2026")
+    log_fn("Writing to local database …")
     try:
         lite = _get_sqlite(cfg)
         _ensure_tables(lite)
         c = lite.cursor()
 
-        # \u2500\u2500 Truncate all tables first, then insert fresh data \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        log_fn("  Clearing old data \u2026")
+        # ── Truncate all tables first, then insert fresh data ──────────────────────
+        log_fn("  Clearing old data …")
         c.execute("DELETE FROM sync_doctors")
         c.execute("DELETE FROM sync_doctorstiming")
         c.execute("DELETE FROM sync_misel")
         c.execute("DELETE FROM sync_department")
 
-        # \u2500\u2500 Insert doctors \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Insert doctors ──────────────────────────────────────────────────────────
         c.executemany(
             "INSERT INTO sync_doctors (code,name,rate,department,avgcontime,qualification,synced_at) VALUES (?,?,?,?,?,?,?)",
             [(d.get("code"),d.get("name"),d.get("rate"),d.get("department"),
               d.get("avgcontime"),d.get("qualification"),now_iso) for d in doctors])
 
-        # \u2500\u2500 Insert timings \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Insert timings ─────────────────────────────────────────────────────────
         c.executemany(
             "INSERT INTO sync_doctorstiming (slno,code,t1,t2,synced_at) VALUES (?,?,?,?,?)",
             [(t.get("slno"),t.get("code"),t.get("t1"),t.get("t2"),now_iso) for t in timings])
 
-        # \u2500\u2500 Insert hospital info \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Insert hospital info ───────────────────────────────────────────────────
         if misel:
             c.execute("INSERT INTO sync_misel (firm_name,address1,synced_at) VALUES (?,?,?)",
                       (misel.get("firm_name"),misel.get("address1"),now_iso))
 
-        # \u2500\u2500 Insert departments \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # ── Insert departments ─────────────────────────────────────────────────────
         c.executemany(
             "INSERT INTO sync_department (code,name,synced_at) VALUES (?,?,?)",
             [(d.get("code"),d.get("name"),now_iso) for d in depts])
@@ -263,6 +263,66 @@ def do_sync(cfg, log_fn):
     except Exception as e:
         log_fn(f"ERROR writing SQLite: {e}")
         return False, str(e)
+
+    # ── Write to remote PostgreSQL ─────────────────────────────────────────────
+    try:
+        import psycopg2
+        import psycopg2.extras
+        tgt = cfg.get("target_db", {})
+        pg = psycopg2.connect(
+            host=tgt.get("host", "88.222.212.14"),
+            port=int(tgt.get("port", 5432)),
+            dbname=tgt.get("dbname", "DRS_UNITED_DB"),
+            user=tgt.get("user", "postgres"),
+            password=tgt.get("password", "info@imc"),
+            connect_timeout=10,
+        )
+        pg.autocommit = False
+        cur = pg.cursor()
+        log_fn("Writing to server database …")
+
+        # Clear old data
+        cur.execute("DELETE FROM hms_doctorstiming")
+        cur.execute("DELETE FROM hms_doctors")
+        cur.execute("DELETE FROM hms_hospital_info")
+        cur.execute("DELETE FROM hms_department")
+
+        # Doctors
+        if doctors:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO hms_doctors
+                    (code, name, rate, department, avgcontime, qualification, synced_at)
+                VALUES (%(code)s, %(name)s, %(rate)s, %(department)s,
+                        %(avgcontime)s, %(qualification)s, %(synced_at)s)
+            """, [{**d, "synced_at": now_iso} for d in doctors])
+
+        # Timings
+        if timings:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO hms_doctorstiming (slno, code, t1, t2, synced_at)
+                VALUES (%(slno)s, %(code)s, %(t1)s, %(t2)s, %(synced_at)s)
+            """, [{**t, "synced_at": now_iso} for t in timings])
+
+        # Hospital info
+        if misel:
+            cur.execute(
+                "INSERT INTO hms_hospital_info (firm_name, address1, synced_at) VALUES (%s, %s, %s)",
+                (misel.get("firm_name"), misel.get("address1"), now_iso)
+            )
+
+        # Departments
+        if depts:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO hms_department (code, name, synced_at)
+                VALUES (%(code)s, %(name)s, %(synced_at)s)
+            """, [{**d, "synced_at": now_iso} for d in depts])
+
+        pg.commit()
+        pg.close()
+        log_fn("  Server database updated ✓")
+    except Exception as e:
+        log_fn(f"  WARNING: Server DB sync failed: {e}")
+        log_fn("  (Local SQLite data is still saved)")
 
     summary = (f"✓  Sync complete — "
                f"{len(doctors)} doctors, {len(timings)} timings, "

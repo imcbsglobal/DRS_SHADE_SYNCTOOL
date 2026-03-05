@@ -8,8 +8,13 @@
         "port": 2638
     },
     "target_db": {
-        "type": "sqlite",
-        "path": "db.sqlite3"
+        "type": "postgres",
+        "host": "88.222.212.14",
+        "port": 5432,
+        "dbname": "DRS_UNITED_DB",
+        "user": "postgres",
+        "password": "info@imc",
+        "sqlite_path": "db.sqlite3"
     },
     "sync": {
         "interval_seconds": 300,

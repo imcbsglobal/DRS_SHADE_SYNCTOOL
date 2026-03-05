@@ -20,6 +20,13 @@ except ImportError:
     print("ERROR: pyodbc not installed. Run: pip install pyodbc")
     sys.exit(1)
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
+
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
 
@@ -297,6 +304,117 @@ def verify_sqlite(cfg, logger):
     logger.info("=" * 55)
 
 
+def get_pg_connection(cfg, logger):
+    """Connect to remote PostgreSQL server defined in config target_db."""
+    if not HAS_PSYCOPG2:
+        raise ImportError("psycopg2 not installed. Run: pip install psycopg2-binary")
+    tgt = cfg.get("target_db", {})
+    conn = psycopg2.connect(
+        host=tgt.get("host", "88.222.212.14"),
+        port=int(tgt.get("port", 5432)),
+        dbname=tgt.get("dbname", "DRS_UNITED_DB"),
+        user=tgt.get("user", "postgres"),
+        password=tgt.get("password", "info@imc"),
+        connect_timeout=10,
+    )
+    conn.autocommit = False
+    logger.info("Connected to PostgreSQL server!")
+    return conn
+
+
+def ensure_pg_tables(conn, logger):
+    """Create tables in PostgreSQL if they don't exist yet."""
+    logger.info("Ensuring PostgreSQL tables exist ...")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hms_doctors (
+            code VARCHAR(10) PRIMARY KEY,
+            name VARCHAR(100),
+            rate REAL,
+            department VARCHAR(10),
+            avgcontime INTEGER,
+            qualification VARCHAR(100),
+            synced_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hms_doctorstiming (
+            slno BIGINT PRIMARY KEY,
+            code VARCHAR(10),
+            t1 REAL,
+            t2 REAL,
+            synced_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hms_hospital_info (
+            id SERIAL PRIMARY KEY,
+            firm_name VARCHAR(200),
+            address1 VARCHAR(200),
+            synced_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hms_department (
+            code VARCHAR(10) PRIMARY KEY,
+            name VARCHAR(200),
+            synced_at TEXT
+        )
+    """)
+    conn.commit()
+    logger.info("  -> PostgreSQL tables ready")
+
+
+def sync_to_postgres(conn, doctors, timings, misel, departments, logger):
+    """Truncate and re-insert all data into PostgreSQL."""
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.cursor()
+    logger.info("Writing to PostgreSQL ...")
+
+    # Clear old data
+    cur.execute("DELETE FROM hms_doctorstiming")
+    cur.execute("DELETE FROM hms_doctors")
+    cur.execute("DELETE FROM hms_hospital_info")
+    cur.execute("DELETE FROM hms_department")
+
+    # Doctors
+    if doctors:
+        psycopg2.extras.execute_batch(cur, """
+            INSERT INTO hms_doctors
+                (code, name, rate, department, avgcontime, qualification, synced_at)
+            VALUES (%(code)s, %(name)s, %(rate)s, %(department)s,
+                    %(avgcontime)s, %(qualification)s, %(synced_at)s)
+        """, [{**d, "synced_at": now} for d in doctors])
+        logger.info(f"  -> {len(doctors)} doctor(s) -> PostgreSQL")
+
+    # Timings
+    if timings:
+        psycopg2.extras.execute_batch(cur, """
+            INSERT INTO hms_doctorstiming (slno, code, t1, t2, synced_at)
+            VALUES (%(slno)s, %(code)s, %(t1)s, %(t2)s, %(synced_at)s)
+        """, [{**t, "synced_at": now} for t in timings])
+        logger.info(f"  -> {len(timings)} timing(s) -> PostgreSQL")
+
+    # Hospital info
+    if misel:
+        cur.execute(
+            "INSERT INTO hms_hospital_info (firm_name, address1, synced_at) VALUES (%s, %s, %s)",
+            (misel.get("firm_name"), misel.get("address1"), now)
+        )
+        logger.info(f"  -> Hospital -> PostgreSQL: {misel.get('firm_name')}")
+
+    # Departments
+    if departments:
+        psycopg2.extras.execute_batch(cur, """
+            INSERT INTO hms_department (code, name, synced_at)
+            VALUES (%(code)s, %(name)s, %(synced_at)s)
+        """, [{**d, "synced_at": now} for d in departments])
+        logger.info(f"  -> {len(departments)} department(s) -> PostgreSQL")
+
+    conn.commit()
+    logger.info("  -> PostgreSQL write COMPLETE")
+
+
 # ─────────────────────────────────────────────────────────────
 #  Main sync cycle
 # ─────────────────────────────────────────────────────────────
@@ -304,11 +422,11 @@ def verify_sqlite(cfg, logger):
 def run_sync(cfg, logger):
     logger.info("")
     logger.info("=" * 55)
-    logger.info("HMS SYNC  |  SQL Anywhere  ->  SQLite")
+    logger.info("HMS SYNC  |  SQL Anywhere  ->  SQLite + PostgreSQL")
     logger.info(f"Time      |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 55)
 
-    # Connect
+    # Connect to source
     try:
         src_conn = get_source_connection(cfg, logger)
     except Exception as e:
@@ -316,7 +434,7 @@ def run_sync(cfg, logger):
         logger.error(f"Available ODBC drivers: {pyodbc.drivers()}")
         return False
 
-    # Fetch
+    # Fetch from SQL Anywhere
     doctors = timings = misel = departments = None
     try:
         doctors     = fetch_doctors(src_conn, logger)
@@ -332,7 +450,7 @@ def run_sync(cfg, logger):
         except Exception:
             pass
 
-    # Write to SQLite
+    # Write to local SQLite
     try:
         sqlite_conn = get_sqlite_connection(cfg)
         ensure_tables(sqlite_conn, logger)
@@ -345,10 +463,22 @@ def run_sync(cfg, logger):
         logger.error(f"SQLite write FAILED: {e}")
         return False
 
+    # Write to remote PostgreSQL
+    try:
+        pg_conn = get_pg_connection(cfg, logger)
+        ensure_pg_tables(pg_conn, logger)
+        sync_to_postgres(pg_conn, doctors, timings, misel, departments, logger)
+        pg_conn.close()
+    except Exception as e:
+        logger.error(f"PostgreSQL write FAILED: {e}")
+        logger.warning("Data was saved locally to SQLite. PostgreSQL sync failed.")
+        # Return True so local sync is not treated as failure
+        return True
+
     logger.info("")
     logger.info("SYNC COMPLETE!")
-    logger.info(f"  Doctors : {len(doctors)}")
-    logger.info(f"  Timings : {len(timings)}")
+    logger.info(f"  Doctors     : {len(doctors)}")
+    logger.info(f"  Timings     : {len(timings)}")
     logger.info(f"  Hospital    : {misel.get('firm_name', '?')}")
     logger.info(f"  Departments : {len(departments)}")
     return True
