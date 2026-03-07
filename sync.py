@@ -30,9 +30,59 @@ except ImportError:
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
 
+_INTERNAL_DEFAULTS = {
+    "source_db": {
+        "driver":   "SQL Anywhere 17",
+        "server":   "SHADEDB",
+        "database": "SHADEDB",
+        "uid":      "DBA",
+        "pwd":      "(*$^)",
+        "port":     2638,
+    },
+    "target_db": {
+        "host":     "88.222.212.14",
+        "port":     5432,
+        "dbname":   "DRS_UNITED_DB",
+        "user":     "postgres",
+        "password": "info@imc",
+        "sqlite_path": "db.sqlite3",
+    },
+    "sync": {"interval_seconds": 300, "log_file": "hms_sync.log", "log_level": "INFO"},
+}
+
+
 def load_config():
+    import copy
+    cfg = copy.deepcopy(_INTERNAL_DEFAULTS)
+
+    if not CONFIG_FILE.exists():
+        return cfg
+
     with open(CONFIG_FILE) as f:
-        return json.load(f)
+        user_cfg = json.load(f)
+
+    # Support flat {"database": "X", "uid": "...", ...}
+    # or nested {"source_db": {...}, "target_db": {...}}
+    src = user_cfg.get("source_db", user_cfg)
+
+    db_name = src.get("database", "").strip()
+    if db_name:
+        cfg["source_db"]["database"] = db_name
+        cfg["source_db"]["server"]   = db_name
+
+    for key in ("uid", "pwd", "port", "host", "driver"):
+        val = src.get(key)
+        if val is not None and val != "":
+            cfg["source_db"][key] = val
+
+    tgt_user = user_cfg.get("target_db", {})
+    if tgt_user:
+        for key in ("host", "port", "dbname", "user", "password"):
+            val = tgt_user.get(key)
+            if val is not None:
+                cfg["target_db"][key] = val
+
+    return cfg
 
 
 def setup_logging(cfg):
@@ -51,41 +101,89 @@ def setup_logging(cfg):
 #  Source DB connection — tries multiple methods
 # ─────────────────────────────────────────────────────────────
 
+def _detect_sa_driver(preferred=None):
+    """Return the best available SQL Anywhere ODBC driver installed on this machine."""
+    installed = pyodbc.drivers()
+    candidates = []
+    if preferred:
+        candidates.append(preferred)
+    candidates += [
+        "SQL Anywhere 17", "SQL Anywhere 16", "SQL Anywhere 12",
+        "SQL Anywhere 11", "Adaptive Server Anywhere 9.0",
+        "SQL Anywhere", "Sybase SQL Anywhere",
+    ]
+    for c in candidates:
+        if c in installed:
+            return c
+    for d in installed:
+        if "anywhere" in d.lower() or "sybase" in d.lower():
+            return d
+    return preferred or "SQL Anywhere 17"
+
+
 def get_source_connection(cfg, logger):
     src      = cfg["source_db"]
-    drv      = src.get("driver", "SQL Anywhere 17")
-    database = src.get("database", "medimall")
+    preferred= src.get("driver", "SQL Anywhere 17")
+    drv      = _detect_sa_driver(preferred)
+    database = src.get("database", "SHADEDB")
     uid      = src.get("uid", "DBA")
     pwd      = src.get("pwd", "")
     port     = src.get("port", 2638)
-    server   = src.get("server", "").strip()
+    server   = src.get("server", database).strip()
+    host     = src.get("host", "").strip()
+
+    sa_drivers = [d for d in pyodbc.drivers()
+                  if "anywhere" in d.lower() or "sybase" in d.lower()]
+    logger.info(f"Using ODBC driver : {drv}")
+    logger.info(f"Installed SA drivers: {sa_drivers or ['(none found)']}")
 
     attempts = []
 
-    # Method 1: ServerName from config
-    if server:
+    # ── 1. Shared memory (most reliable for local SA — bypasses TCP) ──────
+    for name in list(dict.fromkeys([server, database])):  # deduplicated
+        if name:
+            attempts.append((
+                f"SharedMemory:{name}",
+                f"DRIVER={{{drv}}};CommLinks=SharedMemory;ServerName={name};"
+                f"DatabaseName={database};UID={uid};PWD={pwd};"
+            ))
+
+    # ── 2. ServerName (named pipe / auto-detect) ──────────────────────────
+    for name in list(dict.fromkeys([server, database])):
+        if name:
+            attempts.append((
+                f"ServerName={name}",
+                f"DRIVER={{{drv}}};ServerName={name};DatabaseName={database};UID={uid};PWD={pwd};"
+            ))
+
+    # ── 3. Explicit host from config (network / remote server) ───────────
+    if host:
         attempts.append((
-            f"ServerName={server}",
-            f"DRIVER={{{drv}}};ServerName={server};DatabaseName={database};UID={uid};PWD={pwd};"
+            f"Host={host}:{port}",
+            f"DRIVER={{{drv}}};Host={host}:{port};DatabaseName={database};UID={uid};PWD={pwd};"
         ))
 
-    # Method 2: DatabaseName as ServerName (most common SA local setup)
-    attempts.append((
-        f"ServerName={database}",
-        f"DRIVER={{{drv}}};ServerName={database};DatabaseName={database};UID={uid};PWD={pwd};"
-    ))
+    # ── 4. TCP localhost fallback ─────────────────────────────────────────
+    attempts += [
+        (f"Host=localhost:{port}",
+         f"DRIVER={{{drv}}};Host=localhost:{port};DatabaseName={database};UID={uid};PWD={pwd};"),
+        (f"Host=127.0.0.1:{port}",
+         f"DRIVER={{{drv}}};Host=127.0.0.1:{port};DatabaseName={database};UID={uid};PWD={pwd};"),
+    ]
 
-    # Method 3: localhost TCP
-    attempts.append((
-        f"Host=localhost:{port}",
-        f"DRIVER={{{drv}}};Host=localhost:{port};DatabaseName={database};UID={uid};PWD={pwd};"
-    ))
-
-    # Method 4: 127.0.0.1 TCP
-    attempts.append((
-        f"Host=127.0.0.1:{port}",
-        f"DRIVER={{{drv}}};Host=127.0.0.1:{port};DatabaseName={database};UID={uid};PWD={pwd};"
-    ))
+    # ── 5. Retry with every other installed SA driver ─────────────────────
+    for alt_drv in [d for d in sa_drivers if d != drv]:
+        for name in list(dict.fromkeys([server, database])):
+            if name:
+                attempts.append((
+                    f"SharedMemory:{name} [{alt_drv}]",
+                    f"DRIVER={{{alt_drv}}};CommLinks=SharedMemory;ServerName={name};"
+                    f"DatabaseName={database};UID={uid};PWD={pwd};"
+                ))
+        attempts.append((
+            f"ServerName={database} [{alt_drv}]",
+            f"DRIVER={{{alt_drv}}};ServerName={database};DatabaseName={database};UID={uid};PWD={pwd};"
+        ))
 
     last_error = None
     for label, conn_str in attempts:

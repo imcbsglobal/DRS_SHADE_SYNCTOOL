@@ -98,10 +98,26 @@ def load_config():
 
     # Support both flat {"database": "X"} and nested {"source_db": {"database": "X"}}
     src = user_cfg.get("source_db", user_cfg)
+
     db_name = src.get("database", "").strip()
     if db_name:
         cfg["source_db"]["database"] = db_name
         cfg["source_db"]["server"]   = db_name
+
+    # Optional overrides the client can add to config.json
+    for key in ("uid", "pwd", "port", "host", "driver"):
+        val = src.get(key)
+        if val is not None and val != "":
+            cfg["source_db"][key] = val
+
+    # Target DB overrides (postgres)
+    tgt_user = user_cfg.get("target_db", {})
+    if tgt_user:
+        for key in ("host", "port", "dbname", "user", "password"):
+            val = tgt_user.get(key)
+            if val is not None:
+                cfg.setdefault("target_db", {})[key] = val
+
     return cfg
 
 
@@ -121,28 +137,101 @@ def _rows_to_dicts(cursor):
     return result
 
 
+def _detect_sa_driver(pyodbc, preferred=None):
+    """
+    Return the best available SQL Anywhere ODBC driver name.
+    Tries the preferred driver first, then falls back through known names.
+    """
+    installed = pyodbc.drivers()
+    candidates = []
+    if preferred:
+        candidates.append(preferred)
+    # Newest to oldest, both SAP and Sybase branding
+    candidates += [
+        "SQL Anywhere 17",
+        "SQL Anywhere 16",
+        "SQL Anywhere 12",
+        "SQL Anywhere 11",
+        "Adaptive Server Anywhere 9.0",
+        "SQL Anywhere",
+        "Sybase SQL Anywhere",
+    ]
+    for c in candidates:
+        if c in installed:
+            return c
+    # Last resort: anything with "anywhere" in the name
+    for d in installed:
+        if "anywhere" in d.lower() or "sybase" in d.lower():
+            return d
+    return preferred or "SQL Anywhere 17"   # will fail, but gives a clear error
+
+
 def _get_src_conn(cfg, log):
     import pyodbc
     src = cfg["source_db"]
-    drv = src.get("driver", "SQL Anywhere 17")
-    db  = src.get("database", "")
-    uid = src.get("uid", "DBA")
-    pwd = src.get("pwd", "")
-    port= src.get("port", 2638)
-    srv = src.get("server", "").strip()
+    preferred_drv = src.get("driver", "SQL Anywhere 17")
+    drv  = _detect_sa_driver(pyodbc, preferred_drv)
+    db   = src.get("database", "")
+    uid  = src.get("uid", "DBA")
+    pwd  = src.get("pwd", "")
+    port = src.get("port", 2638)
+    srv  = src.get("server", "").strip()
+    host = src.get("host", "").strip()   # optional explicit host from config
+
+    log(f"  Using ODBC driver: {drv}")
+    log(f"  Available drivers: {[d for d in pyodbc.drivers() if 'anywher' in d.lower() or 'sybase' in d.lower()] or ['(none found)']}")
 
     attempts = []
+
+    # ── 1. Shared memory (fastest, most reliable for local SA) ────────────
+    # CommLinks=SharedMemory bypasses TCP entirely — works even when TCP port
+    # is blocked or SA is not configured as a TCP server.
+    for name in ([srv] if srv else []) + ([db] if db != srv else []):
+        if name:
+            attempts.append((
+                f"SharedMemory:{name}",
+                f"DRIVER={{{drv}}};CommLinks=SharedMemory;ServerName={name};"
+                f"DatabaseName={db};UID={uid};PWD={pwd};"
+            ))
+
+    # ── 2. ServerName via named pipe / shared memory (no CommLinks key) ───
     if srv:
         attempts.append((f"ServerName={srv}",
             f"DRIVER={{{drv}}};ServerName={srv};DatabaseName={db};UID={uid};PWD={pwd};"))
+    attempts.append((f"ServerName={db}",
+        f"DRIVER={{{drv}}};ServerName={db};DatabaseName={db};UID={uid};PWD={pwd};"))
+
+    # ── 3. Explicit host from config.json (network/remote SA) ─────────────
+    if host:
+        attempts.append((
+            f"Host={host}:{port}",
+            f"DRIVER={{{drv}}};Host={host}:{port};DatabaseName={db};UID={uid};PWD={pwd};"
+        ))
+
+    # ── 4. TCP localhost fallback ─────────────────────────────────────────
     attempts += [
-        (f"ServerName={db}",
-         f"DRIVER={{{drv}}};ServerName={db};DatabaseName={db};UID={uid};PWD={pwd};"),
         (f"Host=localhost:{port}",
          f"DRIVER={{{drv}}};Host=localhost:{port};DatabaseName={db};UID={uid};PWD={pwd};"),
         (f"Host=127.0.0.1:{port}",
          f"DRIVER={{{drv}}};Host=127.0.0.1:{port};DatabaseName={db};UID={uid};PWD={pwd};"),
     ]
+
+    # ── 5. Retry all above with every installed SA driver ─────────────────
+    extra_drivers = [d for d in pyodbc.drivers()
+                     if ("anywhere" in d.lower() or "sybase" in d.lower()) and d != drv]
+    for alt_drv in extra_drivers:
+        for name in ([srv] if srv else []) + ([db] if db != srv else []):
+            if name:
+                attempts.append((
+                    f"SharedMemory:{name} [{alt_drv}]",
+                    f"DRIVER={{{alt_drv}}};CommLinks=SharedMemory;ServerName={name};"
+                    f"DatabaseName={db};UID={uid};PWD={pwd};"
+                ))
+        attempts.append((
+            f"ServerName={db} [{alt_drv}]",
+            f"DRIVER={{{alt_drv}}};ServerName={db};DatabaseName={db};UID={uid};PWD={pwd};"
+        ))
+
     last = None
     for label, cs in attempts:
         try:
@@ -150,7 +239,7 @@ def _get_src_conn(cfg, log):
             log(f"Connected via {label}")
             return conn
         except Exception as e:
-            log(f"  ✗ {label}: {str(e)[:60]}")
+            log(f"  ✗ {label}: {str(e)[:80]}")
             last = e
     raise ConnectionError(f"All attempts failed. Last: {last}")
 
@@ -194,8 +283,24 @@ def do_sync(cfg, log_fn):
     try:
         src = _get_src_conn(cfg, log_fn)
     except Exception as e:
-        log_fn(f"ERROR: {e}")
-        return False, str(e)
+        err_str = str(e)
+        log_fn(f"ERROR: {err_str}")
+        # Give the client a plain-language explanation
+        if "-100" in err_str or "server not found" in err_str.lower():
+            log_fn("")
+            log_fn("  ─────────────────────────────────────────────")
+            log_fn("  ✗  The SQL Anywhere database engine is not")
+            log_fn("     running on this computer.")
+            log_fn("")
+            log_fn("  To fix this:")
+            log_fn("  1. Open the SQL Anywhere / Sybase Central")
+            log_fn("     application on this PC.")
+            log_fn("  2. Start the database server (dbsrv17.exe)")
+            log_fn("     and make sure the SHADEDB database is")
+            log_fn("     loaded and running.")
+            log_fn("  3. Then click 'Sync Now' again.")
+            log_fn("  ─────────────────────────────────────────────")
+        return False, err_str
 
     try:
         cur = src.cursor()
@@ -1905,13 +2010,7 @@ class StatusWindow(tk.Tk):
             command=self._clear_log,
         ).pack(side="left", padx=(8, 0))
 
-        tk.Button(
-            btn_frame, text="⚙  DB Settings",
-            font=("Segoe UI", 9),
-            bg=PANEL_BG, fg=WARNING, activebackground=BORDER,
-            relief="flat", cursor="hand2", padx=12, pady=8,
-            command=self._open_db_settings,
-        ).pack(side="left", padx=(8, 0))
+
 
 
         # ── Powered by IMC footer ─────────────────────────────────────────
@@ -2055,7 +2154,7 @@ class StatusWindow(tk.Tk):
     # ── DB Settings dialog ────────────────────────────────────────────────
 
     def _open_db_settings(self):
-        """Simple dialog — change the database name written to config.json."""
+        """Dialog — change source DB connection settings saved to config.json."""
         dlg = tk.Toplevel(self)
         dlg.title("Database Settings")
         dlg.configure(bg=DARK_BG)
@@ -2063,52 +2162,83 @@ class StatusWindow(tk.Tk):
         dlg.grab_set()
 
         self.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 360) // 2
-        y = self.winfo_y() + (self.winfo_height() - 210) // 2
-        dlg.geometry(f"360x210+{x}+{y}")
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 420) // 2
+        dlg.geometry(f"400x420+{x}+{y}")
 
         tk.Frame(dlg, bg=ACCENT, height=4).pack(fill="x")
-        tk.Label(dlg, text="⚙  Change Database",
+        tk.Label(dlg, text="⚙  Database Connection Settings",
                  font=("Segoe UI", 13, "bold"),
-                 bg=DARK_BG, fg=TEXT, padx=20, pady=14).pack(anchor="w")
+                 bg=DARK_BG, fg=TEXT, padx=20, pady=12).pack(anchor="w")
 
         form = tk.Frame(dlg, bg=DARK_BG, padx=20)
         form.pack(fill="x")
 
-        tk.Label(form, text="Database Name",
-                 font=("Segoe UI", 9), bg=DARK_BG, fg=MUTED, anchor="w"
-                 ).pack(fill="x", pady=(0, 4))
+        src = self.cfg.get("source_db", {})
 
-        cur_db = self.cfg.get("source_db", {}).get("database", "SHADEDB")
-        e_db = tk.Entry(form, font=("Segoe UI", 11),
-                        bg=PANEL_BG, fg=TEXT, insertbackground=TEXT,
-                        relief="flat", bd=8)
-        e_db.insert(0, cur_db)
-        e_db.pack(fill="x", ipady=5)
-        e_db.focus_set()
-        e_db.select_range(0, "end")
+        def _field(parent, label, default, show=""):
+            tk.Label(parent, text=label, font=("Segoe UI", 9),
+                     bg=DARK_BG, fg=MUTED, anchor="w").pack(fill="x", pady=(8, 2))
+            e = tk.Entry(parent, font=("Segoe UI", 11),
+                         bg=PANEL_BG, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", bd=8, show=show)
+            e.insert(0, str(default))
+            e.pack(fill="x", ipady=4)
+            return e
 
-        tk.Label(form, text="This value is saved to config.json next to the exe.",
-                 font=("Segoe UI", 8), bg=DARK_BG, fg=MUTED).pack(anchor="w", pady=(6, 0))
+        e_db   = _field(form, "Database / Server Name  (required)", src.get("database", "SHADEDB"))
+        e_uid  = _field(form, "Username", src.get("uid", "DBA"))
+        e_pwd  = _field(form, "Password", src.get("pwd", ""), show="●")
+        e_port = _field(form, "Port  (default 2638)", src.get("port", 2638))
+        e_host = _field(form, "Host IP / Name  (leave blank for local DB)",
+                        src.get("host", ""))
+
+        tk.Label(form, text="Settings saved to config.json next to the exe.",
+                 font=("Segoe UI", 8), bg=DARK_BG, fg=MUTED).pack(anchor="w", pady=(10, 0))
 
         status_var = tk.StringVar()
         status_lbl = tk.Label(dlg, textvariable=status_var,
                               font=("Segoe UI", 9), bg=DARK_BG, fg=SUCCESS)
         status_lbl.pack(pady=(6, 0))
 
+        e_db.focus_set()
+        e_db.select_range(0, "end")
+
         def save():
-            db = e_db.get().strip()
+            db   = e_db.get().strip()
+            uid  = e_uid.get().strip()
+            pwd  = e_pwd.get()
+            host = e_host.get().strip()
+            try:
+                port = int(e_port.get().strip())
+            except ValueError:
+                status_var.set("✗  Port must be a number")
+                status_lbl.configure(fg=ERROR)
+                return
             if not db:
                 status_var.set("✗  Database name cannot be empty")
                 status_lbl.configure(fg=ERROR)
                 return
+
             # Update in-memory config
             self.cfg["source_db"]["database"] = db
             self.cfg["source_db"]["server"]   = db
-            # Write simple flat config.json
+            self.cfg["source_db"]["uid"]      = uid
+            self.cfg["source_db"]["pwd"]      = pwd
+            self.cfg["source_db"]["port"]     = port
+            if host:
+                self.cfg["source_db"]["host"] = host
+            elif "host" in self.cfg["source_db"]:
+                del self.cfg["source_db"]["host"]
+
+            # Build config dict — only write non-default/non-empty values
+            cfg_out = {"database": db, "uid": uid, "pwd": pwd, "port": port}
+            if host:
+                cfg_out["host"] = host
+
             try:
                 with open(CONFIG_FILE, "w") as f:
-                    json.dump({"database": db}, f, indent=4)
+                    json.dump(cfg_out, f, indent=4)
                 status_var.set(f"✓  Saved!  DB = {db}")
                 status_lbl.configure(fg=SUCCESS)
                 self._refresh_db_banner(db)
